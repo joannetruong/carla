@@ -56,7 +56,27 @@ except IndexError:
     pass
 
 import carla
-from carla import ColorConverter as cc
+# from carla import ColorConverter as cc
+
+try:
+    sys.path.append(glob.glob('PythonAPI')[0])
+except IndexError:
+    print("PythonAPI package wasn't found")
+
+try:
+    sys.path.append(glob.glob('**/agents')[0])
+except IndexError:
+    print("PythonAPI/agents package wasn't found")
+
+try:
+    sys.path.append(glob.glob('**/agents/navigation')[0])
+except IndexError:
+    print("PythonAPI/agents/navigation package wasn't found")
+
+try:
+    sys.path.append(glob.glob('**/agents/tools')[0])
+except IndexError:
+    print("PythonAPI/agents/tools package wasn't found")
 
 from agents.navigation.behavior_agent import BehaviorAgent  # pylint: disable=import-error
 from agents.navigation.roaming_agent import RoamingAgent  # pylint: disable=import-error
@@ -706,6 +726,8 @@ def game_loop(args):
             else:
                 destination = spawn_points[1].location
 
+            print('start: ', agent.vehicle.get_location())
+            print('goal: ', destination)
             agent.set_destination(agent.vehicle.get_location(), destination, clean=True)
 
         clock = pygame.time.Clock()
@@ -754,6 +776,7 @@ def game_loop(args):
                 agent.get_local_planner().set_speed(speed_limit)
 
                 control = agent.run_step()
+                print('control: ', control)
                 world.player.apply_control(control)
 
     finally:

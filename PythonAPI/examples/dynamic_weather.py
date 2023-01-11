@@ -130,7 +130,7 @@ def main():
     update_freq = 0.1 / speed_factor
 
     client = carla.Client(args.host, args.port)
-    client.set_timeout(2.0)
+    client.set_timeout(10.0)
     world = client.get_world()
 
     weather = Weather(world.get_weather())
