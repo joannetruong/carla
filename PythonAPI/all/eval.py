@@ -15,7 +15,7 @@ import weakref
 
 import cv2
 from scipy import ndimage
-from real_policy import ContextNavPolicy
+from real_policy import NavPolicy, ContextNavPolicy
 from abstract_agent import AbstractAgent
 
 try:
@@ -126,7 +126,7 @@ class EvalWorld(gym.Env):
         self.world.set_weather(weather)
 
     def init_robot(self, start_position):
-        bp = random.choice(self.blueprint_library.filter("vehicle.mercedes-benz.coupe"))
+        # bp = random.choice(self.blueprint_library.filter("vehicle.mercedes-benz.coupe"))
         #
         # # A blueprint contains the list of attributes that define a vehicle's
         # # instance, we can read them and modify some of them. For instance,
@@ -136,7 +136,7 @@ class EvalWorld(gym.Env):
         #     bp.set_attribute('color', color)
 
         # bp = self.blueprint_library.filter('static.prop.constructioncone')[0]
-        # bp = self.blueprint_library.filter('static.prop.constructioncone')[0]
+        bp = self.blueprint_library.filter('static.prop.constructioncone')[0]
         # Now we need to give an initial transform to the vehicle. We choose a
         # random transform from the list of recommended spawn points of the map.
         # transform = random.choice(self.world.get_map().get_spawn_points())
@@ -389,6 +389,12 @@ class EvalWorld(gym.Env):
 
         return rho_theta
 
+    def rescale_actions(self, actions, action_thresh=0.05, silence_only=False):
+        actions = np.clip(actions, -1, 1)
+        # Silence low actions
+        actions[np.abs(actions) < action_thresh] = 0.0
+        return actions
+
     def eval_episode(self, display, episode, policy):
         start_position = episode["start_position"]
         goal_position = episode["goal_position"]
@@ -400,23 +406,26 @@ class EvalWorld(gym.Env):
             f"geodesic_dist: {episode_geo_dist}"
         )
 
-        MAX_STEPS = 1000
-        SUCCESS_DISTANCE = 0.425
-        DEBUG = False
-        num_actions = 0
-        num_collisions = 0
-        done = False
-        success = False
-        episode_distance = 0
+        self.max_steps = 1000
+        self.success_dist = 0.425
+        self.debug = True
+        self.num_actions = 0
+        self.num_collisions = 0
+        self.done = False
+        self.success = False
+        self.episode_distance = 0
+        self.max_lin_dist = 0.25 # m/s
+        self.max_ang_dist = 0.26 # rad/s
+        self.ctrl_hz = 2
 
-        while not done:
+        while not self.done:
             depth_img = self.get_depth_image()
             orig_grid, context_map = self.get_occupancy_map()
 
-            if DEBUG:
-                cv2.imwrite(f"_out/depth_{num_actions}.png", depth_img)
+            if self.debug:
+                cv2.imwrite(f"eval_imgs/{self.town_name}_{self.episode_id}/depth_{self.num_actions}.png", depth_img)
                 cv2.imwrite(
-                    f"_out/map_{num_actions}.png", context_map.astype(np.uint8) * 255
+                    f"eval_imgs/{self.town_name}_{self.episode_id}/map_{self.num_actions}.png", context_map.astype(np.uint8) * 255
                 )
 
             collision = False
@@ -425,12 +434,16 @@ class EvalWorld(gym.Env):
             if not self.collision_queue.empty():
                 collision = self.collision_queue.get()
             if collision:
-                num_collisions += 1
-                print(f"COLLISION! {num_collisions}")
+                self.num_collisions += 1
+                print(f"COLLISION! {self.num_collisions}")
                 self.set_pos_rot(curr_xyz, curr_rpy)
             else:
                 observations = {}
+                # gps compass
                 gps_compass = self._compute_pointgoal(goal_position[:2])
+                observations["pointgoal_with_gps_compass"] = gps_compass
+
+                # depth obs
                 split_depth_img = np.split(depth_img, 2, axis=1)
                 observations["spot_left_depth"] = np.expand_dims(
                     split_depth_img[1], 2
@@ -438,30 +451,42 @@ class EvalWorld(gym.Env):
                 observations["spot_right_depth"] = np.expand_dims(
                     split_depth_img[0], 2
                 ).astype("float32")
-                observations["pointgoal_with_gps_compass"] = gps_compass
-                observations["context_map"] = context_map
 
-                actions = policy.act(observations, deterministic=True)
-                print("actions: ", actions)
+                # context map
+                if self.policy_type == "ContextNavPolicy":
+                    context_map = np.expand_dims(context_map, 2).astype(np.float32)
+                    pose_goal_map = np.zeros_like(context_map)
+                    context_map_full = np.concatenate([context_map, pose_goal_map], axis=2)
+                    observations["context_map"] = context_map_full
+
+                policy_actions = policy.act(observations, deterministic=True)
+                base_action = self.rescale_actions(policy_actions, silence_only=True)
+                base_action *= [self.max_lin_dist, self.max_ang_dist]
+                base_vel = base_action * self.ctrl_hz
+
+                print(f"Action # {self.num_actions}, "
+                      f"Vx: {base_vel[0]}, "
+                      f"Wz: {np.rad2deg(base_vel[1])}"
+                      f"pointgoal: {gps_compass}")
                 # # lin_vel, hor_vel, ang_vel (in radians)
                 # lin_vel = 1.0
                 # ang_vel = np.deg2rad(0.0)
-                # actions = np.array([lin_vel, 0.0, ang_vel])
+                actions = np.array([base_vel[0], 0.0, base_vel[1]])
                 self.apply_control(actions)
 
             self.world.tick()
             # world.world.wait_for_tick(10.0)
             new_xyz, new_rpy = self.get_pos_rot()
             # print("curr_xyz:", curr_xyz, "new_xyz: ", new_xyz)
-            num_actions += 1
+            self.num_actions += 1
             dist_to_goal = np.linalg.norm(new_xyz[:2] - goal_position[:2])
-            episode_distance += np.linalg.norm(new_xyz[:2] - curr_xyz[:2])
-            if dist_to_goal < SUCCESS_DISTANCE:
-                done = True
-                success = True
-            if num_actions > MAX_STEPS:
-                done = True
-                success = False
+            self.episode_distance += np.linalg.norm(new_xyz[:2] - curr_xyz[:2])
+            if dist_to_goal < self.success_dist:
+                self.done = True
+                self.success = True
+            if self.num_actions > self.max_steps:
+                self.done = True
+                self.success = False
 
             # print('moved vehicle to:', np.linalg.norm(new_xyz - curr_xyz), np.rad2deg(np.abs(curr_rpy[-1] - new_rpy[-1])))
             # world.tick(clock)
@@ -472,14 +497,15 @@ class EvalWorld(gym.Env):
             pygame.display.flip()
         print(
             f"EPISODE TERMINATED. "
-            f"SUCCESS: {success} "
-            f"SPL: {success * (episode_distance / np.max(episode_distance, episode_geo_dist))} "
-            f"# ACTIONS: {num_actions}, "
+            f"self.success: {self.success} "
+            f"SPL: {self.success * (self.episode_distance / np.max(self.episode_distance, episode_geo_dist))} "
+            f"# ACTIONS: {self.num_actions}, "
             f"DIST2GOAL: {dist_to_goal} "
         )
 
     def init_world(self, args, episode):
         start_position = episode["start_position"]
+        os.makedirs(f"eval_imgs/{self.town_name}_{self.episode_id}", exist_ok=True)
 
         display = pygame.display.set_mode(
             (args.width, args.height), pygame.HWSURFACE | pygame.DOUBLEBUF
@@ -501,11 +527,18 @@ class EvalWorld(gym.Env):
         self.client.apply_batch(
             [carla.command.DestroyActor(x) for x in self.actor_list]
         )
-        print("done.")
+        print("self.done.")
 
     def game_loop(self, args, episode, weights):
+        self.episode_id = episode['episode_id']
+        self.town_name = self.world_name.split('/')[-1]
+
         ## load policy
-        policy = eval(args.policy_type)(weights)
+        if args.policy_type == "context":
+            self.policy_type = "ContextNavPolicy"
+        elif args.policy_type == "pointnav":
+            self.policy_type = "NavPolicy"
+        policy = eval(self.policy_type)(weights)
         policy.reset()
 
         ## run eval
@@ -552,7 +585,7 @@ def main():
         "-pt",
         "--policy-type",
         type=str,
-        choices=["ContextNavPolicy", "NavPolicy"],
+        choices=["context", "pointnav"],
         help="select which agent to run",
         default="ContextNavPolicy",
     )
@@ -581,7 +614,11 @@ def main():
     # world_names = ["Town01", "Town02", "Town03", "Town04", "Town05", "Town06", "Town07", "Town10HD"]
 
     weights_dir = "/home/joanne/repos/carla/PythonAPI/all/weights/"
-    policy_pth = "spot_depth_context_resnet18_map_prevact_sincos32_log_rot_100_-1.0_cma_bp_0.3_sd_1_ckpt_93.pth"
+    if args.policy_type == "context":
+        policy_pth = "spot_depth_context_resnet18_map_prevact_sincos32_log_rot_100_-1.0_cma_bp_0.3_sd_1_ckpt_93.pth"
+    else:
+        # policy_pth = "spot_depth_simple_cnn_cutout_nhy_2hz_hm3d_mf_rand_pitch_-1.0_1.0_bp_0.03_log_sd_1_ckpt_95.pth"
+        policy_pth = "spot_depth_simple_cnn_cutout_nhy_2hz_hm3d_mf_rand_pitch_-1.0_1.0_bp_0.03_log_sd_1_ckpt_95_v2.pth"
     weights = os.path.join(weights_dir, policy_pth)
 
     for world_name in world_names:

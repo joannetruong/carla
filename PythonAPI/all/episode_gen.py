@@ -29,7 +29,8 @@ def main():
         "Town10HD",
     ]
 
-    os.makedirs("carla_sidewalk_goals", exist_ok=True)
+    dir_name = "carla_sidewalk_goals_7m"
+    os.makedirs(dir_name, exist_ok=True)
     for world_name in world_names:
         simulator = CarlaSimWorld(world_loc + world_name)
         dao = GlobalRoutePlannerDAO(simulator.world.get_map(), 2)
@@ -37,8 +38,9 @@ def main():
         grp.setup()
 
         min_dist = 1
-        max_dist = 150
-        eps_per_scene = 100
+        # max_dist = 150
+        max_dist = 7
+        eps_per_scene = 1
 
         scene_dataset = {}
         scene_dataset["episodes"] = []
@@ -92,7 +94,7 @@ def main():
             f"num episodes: {len(scene_dataset['episodes'])} "
             f"avg geo dist: {np.mean(np.array(geo_dists))}"
         )
-        with open(f"carla_sidewalk_goals/{world_name}.json", "w") as outfile:
+        with open(f"{dir_name}/{world_name}.json", "w") as outfile:
             json.dump(scene_dataset, outfile)
 
 
