@@ -5,11 +5,10 @@ import numpy as np
 import torch
 from gym import spaces
 from gym.spaces import Dict as SpaceDict
-from habitat_baselines.rl.ddppo.policy.resnet_policy import \
-    PointNavResNetPolicy
-from habitat_baselines.rl.ddppo.policy.splitnet_policy import \
-    PointNavSplitNetPolicy
-from habitat_baselines.rl.ppo.policy import PointNavBaselinePolicy, PointNavContextPolicy, PointNavContextCMAPolicy
+from habitat_baselines.rl.ppo.policy import (
+    PointNavBaselinePolicy,
+    PointNavContextCMAPolicy,
+)
 from habitat_baselines.utils.common import batch_obs
 from habitat.config import Config
 
@@ -25,9 +24,9 @@ def to_tensor(v):
 
 
 class RealPolicy:
-    def __init__(self, cfg, observation_space, action_space, device):
+    def __init__(self, weights, policy_name, observation_space, action_space, device):
         self.device = device
-        checkpoint = torch.load(cfg.weights, map_location="cpu")
+        checkpoint = torch.load(weights, map_location="cpu")
         config = checkpoint["config"]
         if "num_cnns" not in config.RL.POLICY:
             config.RL.POLICY["num_cnns"] = 1
@@ -35,7 +34,7 @@ class RealPolicy:
         config.defrost()
         config.RL.POLICY.OBS_TRANSFORMS.ENABLED_TRANSFORMS = []
         config.freeze()
-        self.policy = eval(cfg.policy_name).from_config(
+        self.policy = eval(policy_name).from_config(
             config=config,
             observation_space=observation_space,
             action_space=action_space,
@@ -47,7 +46,7 @@ class RealPolicy:
 
         # If using Splitnet policy, filter out decoder stuff, as it's not used at test-time
         self.policy.load_state_dict(
-            {k[len("actor_critic."):]: v for k, v in checkpoint["state_dict"].items()},
+            {k[len("actor_critic.") :]: v for k, v in checkpoint["state_dict"].items()},
             # strict=True,
             strict=False,
         )
@@ -74,6 +73,7 @@ class RealPolicy:
 
     def act(self, observations, deterministic=True):
         assert self.reset_ran, "You need to call .reset() on the policy first."
+
         batch = batch_obs([observations], device=self.device)
         with torch.no_grad():
             start_time = time.time()
@@ -96,9 +96,12 @@ class RealPolicy:
 
 
 class NavPolicy(RealPolicy):
-    def __init__(self, cfg, device):
-        obs_right_key = f"spot_right_{cfg.sensor_type}"
-        obs_left_key = f"spot_left_{cfg.sensor_type}"
+    def __init__(self, weights):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        obs_right_key = f"spot_right_depth"
+        obs_left_key = f"spot_left_depth"
+        policy_name = "PointNavBaselinePolicy"
+
         observation_space = SpaceDict(
             {
                 obs_left_key: spaces.Box(
@@ -115,12 +118,13 @@ class NavPolicy(RealPolicy):
                 ),
             }
         )
-        action_dim = 3 if cfg.use_horizontal_velocity else 2
+        action_dim = 2
         # Linear, angular, and horizontal velocity (in that order)
         action_space = spaces.Box(-1.0, 1.0, (action_dim,))
         action_space.n = action_dim
         super().__init__(
-            cfg,
+            weights,
+            policy_name,
             observation_space,
             action_space,
             device,
@@ -128,16 +132,13 @@ class NavPolicy(RealPolicy):
 
 
 class ContextNavPolicy(RealPolicy):
-    def __init__(self, cfg, device):
-        if cfg.sensor_type == "depth":
-            obs_right_key = "spot_right_depth"
-            obs_left_key = "spot_left_depth"
-        elif cfg.sensor_type == "gray":
-            obs_right_key = "spot_right_gray"
-            obs_left_key = "spot_left_gray"
-        context_key = f"context_{cfg.context_type}"
-        map_dim = 2 if cfg.use_agent_map else 1
-        context_shape = (2,) if context_key == "context_waypoint" else (cfg.map_resolution, cfg.map_resolution, map_dim)
+    def __init__(self, weights):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        obs_right_key = "spot_right_depth"
+        obs_left_key = "spot_left_depth"
+        context_key = f"context_map"
+        policy_name = "PointNavContextCMAPolicy"
+        context_shape = (100, 100, 2)
         observation_space = SpaceDict(
             {
                 obs_left_key: spaces.Box(
@@ -160,12 +161,13 @@ class ContextNavPolicy(RealPolicy):
                 ),
             }
         )
-        action_dim = 3 if cfg.use_horizontal_velocity else 2
+        action_dim = 2
         # Linear, angular, and horizontal velocity (in that order)
         action_space = spaces.Box(-1.0, 1.0, (action_dim,))
         action_space.n = action_dim
         super().__init__(
-            cfg,
+            weights,
+            policy_name,
             observation_space,
             action_space,
             device,
