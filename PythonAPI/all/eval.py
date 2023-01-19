@@ -73,21 +73,9 @@ IM_H = 256
 SENSOR_HEIGHT = 0.65
 FOV = 58.286
 # MAX_DEPTH = 3.5
-MAX_DEPTH = 10.0
+MAX_DEPTH = 3.5
 MIN_DEPTH = 0.0
 MAP_RES = 100
-from gym import spaces
-import torch
-
-# from real_policy import NavPolicy, ContextNavPolicy
-# from agents.navigation.pointnav_agent import PointNavAgent
-from agents.navigation.behavior_agent import (
-    BehaviorAgent,
-)  # pylint: disable=import-error
-from agents.navigation.roaming_agent import RoamingAgent  # pylint: disable=import-error
-from agents.navigation.basic_agent import BasicAgent  # pylint: disable=import-error
-
-#
 
 
 class EvalWorld(gym.Env):
@@ -110,7 +98,7 @@ class EvalWorld(gym.Env):
         self.results["results"] = []
 
         self.init_weather()
-        # self.init_settings()
+        self.init_settings()
 
         pygame.init()
         pygame.font.init()
@@ -119,10 +107,12 @@ class EvalWorld(gym.Env):
         self.hud = HUD(1280, 720)
         self._gamma = 2.2
 
-    def init_settings(self):
+    def init_settings(self, fps=40):
         settings = self.world.get_settings()
         # settings.fixed_delta_seconds = 0.5
+        settings.no_rendering_mode = True
         settings.synchronous_mode = True
+        settings.fixed_delta_seconds = 1 / fps
         self.world.apply_settings(settings)
 
     def init_weather(self):
@@ -260,9 +250,9 @@ class EvalWorld(gym.Env):
         depth_img_meters = depth_img_meters / MAX_DEPTH
         return depth_img_meters
 
-    def get_depth_image(self):
-        right_raw = self.right_depth_queue.get()
-        left_raw = self.left_depth_queue.get()
+    def get_depth_image(self, timeout=2.0):
+        right_raw = self.right_depth_queue.get(timeout)
+        left_raw = self.left_depth_queue.get(timeout)
 
         right_img = np.frombuffer(right_raw.raw_data, dtype=np.dtype("uint8")).astype(
             np.float32
@@ -416,7 +406,7 @@ class EvalWorld(gym.Env):
         actions[np.abs(actions) < action_thresh] = 0.0
         return actions
 
-    def eval_episode(self, display):
+    def eval_episode(self, display, clock):
         start_position = self.episode["start_position"]
         goal_position = self.episode["goal_position"]
         episode_geo_dist = self.episode["geodesic_dist"]
@@ -429,7 +419,7 @@ class EvalWorld(gym.Env):
 
         self.max_steps = 1000
         self.success_dist = 0.425
-        self.debug = True
+        self.debug = False
         self.num_actions = 0
         self.num_collisions = 0
         self.done = False
@@ -440,6 +430,9 @@ class EvalWorld(gym.Env):
         self.ctrl_hz = 1 / 2
 
         while not self.done:
+            curr_xyz, curr_rpy = self.get_pos_rot()
+            clock.tick()
+            self.world.tick()
             left_depth_img, right_depth_img = self.get_depth_image()
             orig_grid, context_map = self.get_occupancy_map()
 
@@ -449,13 +442,12 @@ class EvalWorld(gym.Env):
                     f"eval_imgs/{self.town_name}_{self.episode_id}/depth_{self.num_actions}.png",
                     depth_img * 255.0,
                 )
-                # cv2.imwrite(
-                #     f"eval_imgs/{self.town_name}_{self.episode_id}/map_{self.num_actions}.png",
-                #     context_map.astype(np.uint8) * 255,
-                # )
+                cv2.imwrite(
+                    f"eval_imgs/{self.town_name}_{self.episode_id}/map_{self.num_actions}.png",
+                    context_map.astype(np.uint8) * 255,
+                )
 
             collision = False
-            curr_xyz, curr_rpy = self.get_pos_rot()
 
             if not self.collision_queue.empty():
                 collision = self.collision_queue.get()
@@ -471,7 +463,6 @@ class EvalWorld(gym.Env):
                 observations["pointgoal_with_gps_compass"] = gps_compass
 
                 # depth obs
-                split_depth_img = np.split(depth_img, 2, axis=1)
                 observations["spot_left_depth"] = np.expand_dims(
                     left_depth_img, 2
                 ).astype("float32")
@@ -496,12 +487,9 @@ class EvalWorld(gym.Env):
                 # # lin_vel, hor_vel, ang_vel (in radians)
                 # lin_vel = 1.0
                 # ang_vel = np.deg2rad(0.0)
-                actions = np.array([0.0, 0.0, np.deg2rad(30)])
-                # actions = np.array([base_vel[0], 0.0, base_vel[1]])
+                # actions = np.array([0.0, 0.0, np.deg2rad(30)])
+                actions = np.array([base_vel[0], 0.0, base_vel[1]])
                 self.apply_control(actions)
-
-            self.world.tick()
-            # world.world.wait_for_tick(10.0)
             new_xyz, new_rpy = self.get_pos_rot()
             self.num_actions += 1
             dist_to_goal = np.linalg.norm(new_xyz[:2] - goal_position[:2])
@@ -540,6 +528,7 @@ class EvalWorld(gym.Env):
         ep_results["success"] = self.success
         ep_results["spl"] = spl
         ep_results["num_actions"] = self.num_actions
+        ep_results["num_collisions"] = self.num_collisions
         ep_results["dist2goal"] = dist_to_goal
         ep_results["episode_dist"] = self.episode_distance
         self.results["results"].append(ep_results)
@@ -548,13 +537,16 @@ class EvalWorld(gym.Env):
             f"SUCCESS: {self.success} "
             f"SPL: {spl:0.3f} "
             f"# ACTIONS: {self.num_actions} "
+            f"# COLLISIONS: {self.num_collisions} "
             f"DIST2GOAL: {dist_to_goal:0.3f} "
             f"EPISODE_DIST: {self.episode_distance:0.3f} "
         )
 
     def init_world(self, args, episode):
         start_position = episode["start_position"]
-        os.makedirs(f"eval_imgs/{self.town_name}_{self.episode_id}", exist_ok=True)
+        os.makedirs(
+            f"eval_imgs/{self.town_name}_{self.episode_id}_{time.time()}", exist_ok=True
+        )
 
         display = pygame.display.set_mode(
             (args.width, args.height), pygame.HWSURFACE | pygame.DOUBLEBUF
@@ -567,7 +559,7 @@ class EvalWorld(gym.Env):
         self.init_collision_sensor()
 
         clock = pygame.time.Clock()
-        return display
+        return display, clock
 
     def destroy_actors(self):
         print("destroying actors")
@@ -585,7 +577,7 @@ class EvalWorld(gym.Env):
         policy_types = {"context": "ContextNavPolicy", "pointnav": "NavPolicy"}
         self.policy_type = policy_types[args.policy_type]
 
-        results_dir = f"eval_results/{self.policy_type}/{policy_pth}"
+        results_dir = f"eval_results/{self.policy_type}/{policy_pth}_{time.time()}"
         os.makedirs(results_dir, exist_ok=True)
 
         self.policy = policy
@@ -593,8 +585,8 @@ class EvalWorld(gym.Env):
 
         ## run eval
         try:
-            display = self.init_world(args, episode)
-            self.eval_episode(display)
+            display, clock = self.init_world(args, episode)
+            self.eval_episode(display, clock)
             with open(f"{results_dir}/{self.town_name}.json", "w") as outfile:
                 json.dump(self.results, outfile)
             time.sleep(5)
@@ -663,8 +655,17 @@ def main():
     world_loc = "/Game/Carla/Maps/"
     episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals"
     # episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_7m"
-    world_names = ["Town01"]
-    # world_names = ["Town01", "Town02", "Town03", "Town04", "Town05", "Town06", "Town07", "Town10HD"]
+    # world_names = ["Town01"]
+    world_names = [
+        "Town01",
+        "Town02",
+        "Town03",
+        "Town04",
+        "Town05",
+        "Town06",
+        "Town07",
+        "Town10HD",
+    ]
 
     weights_dir = "/home/joanne/repos/carla/PythonAPI/all/weights/"
 
