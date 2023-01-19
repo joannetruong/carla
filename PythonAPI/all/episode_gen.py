@@ -1,22 +1,39 @@
 import numpy as np
 import random
 import os
-import tqdm
 
 import json
-
-from functools import lru_cache
 
 from sim_world import CarlaSimWorld
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 
-from queue import PriorityQueue
-
+import argparse
 import carla
 
 
 def main():
+    argparser = argparse.ArgumentParser(description="CARLA Automatic Control Client")
+    argparser.add_argument(
+        "-min",
+        "--min-dist",
+        default=1,
+        type=int,
+    )
+    argparser.add_argument(
+        "-max",
+        "--max-dist",
+        default=100,
+        type=int,
+    )
+    argparser.add_argument(
+        "-n",
+        "--num-eps-per-scene",
+        default=12,
+        type=int,
+    )
+    args = argparser.parse_args()
+
     world_loc = "/Game/Carla/Maps/"
     world_names = [
         "Town01",
@@ -29,7 +46,12 @@ def main():
         "Town10HD",
     ]
 
-    dir_name = "carla_sidewalk_goals_7m"
+    min_dist = args.min_dist
+    max_dist = args.max_dist
+
+    total_num_eps = int(len(world_names) * args.num_eps_per_scene)
+    print("TOTAL # EPS: ", total_num_eps)
+    dir_name = f"carla_sidewalk_goals_mindist_{min_dist}_maxdist_{max_dist}_totaleps_{total_num_eps}"
     os.makedirs(dir_name, exist_ok=True)
     for world_name in world_names:
         simulator = CarlaSimWorld(world_loc + world_name)
@@ -37,10 +59,7 @@ def main():
         grp = GlobalRoutePlanner(dao)
         grp.setup()
 
-        min_dist = 1
-        # max_dist = 150
-        max_dist = 7
-        eps_per_scene = 1
+        eps_per_scene = args.num_eps_per_scene
 
         scene_dataset = {}
         scene_dataset["episodes"] = []

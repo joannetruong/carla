@@ -1,22 +1,13 @@
 from __future__ import print_function
 
-import argparse
-import collections
-import datetime
 import glob
-import logging
-import math
 import os
-import random
-import re
 import sys
 import time
-import weakref
 
 import cv2
 from scipy import ndimage
 from real_policy import NavPolicy, ContextNavPolicy
-from abstract_agent import AbstractAgent
 
 try:
     import pygame
@@ -58,22 +49,18 @@ try:
 except IndexError:
     pass
 
-import carla
-from carla import ColorConverter as cc
 
 from automatic_control import *
 import gym
 from queue import Queue
 
-from sim_world import CarlaSimWorld
 import json
 
 IM_W = 128
 IM_H = 256
 SENSOR_HEIGHT = 0.65
 FOV = 58.286
-# MAX_DEPTH = 3.5
-MAX_DEPTH = 3.5
+MAX_DEPTH = 3.0
 MIN_DEPTH = 0.0
 MAP_RES = 100
 
@@ -107,7 +94,7 @@ class EvalWorld(gym.Env):
         self.hud = HUD(1280, 720)
         self._gamma = 2.2
 
-    def init_settings(self, fps=40):
+    def init_settings(self, fps=60):
         settings = self.world.get_settings()
         # settings.fixed_delta_seconds = 0.5
         settings.no_rendering_mode = True
@@ -129,8 +116,8 @@ class EvalWorld(gym.Env):
         #     color = random.choice(bp.get_attribute('color').recommended_values)
         #     bp.set_attribute('color', color)
 
-        # bp = self.blueprint_library.filter('static.prop.constructioncone')[0]
-        bp = self.blueprint_library.filter("static.prop.plantpot03")[0]
+        bp = self.blueprint_library.filter("static.prop.constructioncone")[0]
+        # bp = self.blueprint_library.filter("static.prop.plantpot03")[0]
         # Now we need to give an initial transform to the vehicle. We choose a
         # random transform from the list of recommended spawn points of the map.
         # transform = random.choice(self.world.get_map().get_spawn_points())
@@ -142,17 +129,30 @@ class EvalWorld(gym.Env):
         # So let's tell the world to spawn the vehicle.
         self.robot = self.world.spawn_actor(bp, transform)
 
-        # left_camera_transform = carla.Transform(
-        #     # carla.Location(x=-0.03740343144695029, y=-0.4164822634134684, z=0.5),
-        #     carla.Location(x=0.5, y=0.0, z=0.5),
-        #     carla.Rotation(
-        #         pitch=-25.29999995676659, yaw=-33.0299998892056, roll=15.499998048556108
-        #     ),
-        # )
-        #
-        # self.robot_right = self.world.spawn_actor(
-        #     bp, left_camera_transform, attach_to=self.robot
-        # )
+        right_camera_transform = carla.Transform(
+            # carla.Location(x=0.03740343144695029, y=-0.4164822634134684, z=0.5),
+            carla.Location(x=0.2064822634134684, y=0.03740343144695029, z=0.01),
+            carla.Rotation(
+                pitch=-25.29999995676659, yaw=33.0299998892056, roll=-15.499998048556108
+            ),
+        )
+        left_camera_transform = carla.Transform(
+            # carla.Location(x=-0.03740343144695029, y=-0.4164822634134684, z=0.5),
+            carla.Location(x=0.2064822634134684, y=-0.03740343144695029, z=0.01),
+            carla.Rotation(
+                pitch=-25.29999995676659, yaw=-33.0299998892056, roll=15.499998048556108
+            ),
+        )
+
+        tc = self.blueprint_library.filter("static.prop.constructioncone")[0]
+
+        self.robot_right = self.world.spawn_actor(
+            tc, right_camera_transform, attach_to=self.robot
+        )
+
+        self.robot_left = self.world.spawn_actor(
+            tc, left_camera_transform, attach_to=self.robot
+        )
 
         self.actor_list.append(self.robot)
 
@@ -403,7 +403,8 @@ class EvalWorld(gym.Env):
     def rescale_actions(self, actions, action_thresh=0.05, silence_only=False):
         actions = np.clip(actions, -1, 1)
         # Silence low actions
-        actions[np.abs(actions) < action_thresh] = 0.0
+        if silence_only:
+            actions[np.abs(actions) < action_thresh] = 0.0
         return actions
 
     def eval_episode(self, display, clock):
@@ -417,9 +418,18 @@ class EvalWorld(gym.Env):
             f"geodesic_dist: {episode_geo_dist}"
         )
 
-        self.max_steps = 1000
+        max_steps_ds = {"easy": 500, "medium": 1000, "hard": 1500}
+        self.max_steps = max_steps_ds[self.dataset]
         self.success_dist = 0.425
         self.debug = False
+        if self.debug:
+            eval_img_dir = (
+                f"eval/eval_imgs/{self.town_name}_{self.episode_id}_{time.time()}"
+            )
+            os.makedirs(
+                eval_img_dir,
+                exist_ok=True,
+            )
         self.num_actions = 0
         self.num_collisions = 0
         self.done = False
@@ -435,15 +445,16 @@ class EvalWorld(gym.Env):
             self.world.tick()
             left_depth_img, right_depth_img = self.get_depth_image()
             orig_grid, context_map = self.get_occupancy_map()
+            gps_compass = self._compute_pointgoal(goal_position[:2])
 
             if self.debug:
                 depth_img = np.concatenate((left_depth_img, right_depth_img), axis=1)
                 cv2.imwrite(
-                    f"eval_imgs/{self.town_name}_{self.episode_id}/depth_{self.num_actions}.png",
+                    f"{eval_img_dir}/depth_{self.num_actions}.png",
                     depth_img * 255.0,
                 )
                 cv2.imwrite(
-                    f"eval_imgs/{self.town_name}_{self.episode_id}/map_{self.num_actions}.png",
+                    f"{eval_img_dir}/map_{self.num_actions}.png",
                     context_map.astype(np.uint8) * 255,
                 )
 
@@ -459,9 +470,7 @@ class EvalWorld(gym.Env):
             else:
                 observations = {}
                 # gps compass
-                gps_compass = self._compute_pointgoal(goal_position[:2])
                 observations["pointgoal_with_gps_compass"] = gps_compass
-
                 # depth obs
                 observations["spot_left_depth"] = np.expand_dims(
                     left_depth_img, 2
@@ -479,8 +488,9 @@ class EvalWorld(gym.Env):
                     )
                     observations["context_map"] = context_map_full
 
-                policy_actions = self.policy.act(observations, deterministic=True)
-                base_action = self.rescale_actions(policy_actions, silence_only=True)
+                policy_actions = self.policy.act(observations, deterministic=False)
+                print("policy_actions: ", policy_actions)
+                base_action = self.rescale_actions(policy_actions, silence_only=False)
                 base_action *= [self.max_lin_dist, self.max_ang_dist]
                 base_vel = base_action * self.ctrl_hz
 
@@ -499,7 +509,7 @@ class EvalWorld(gym.Env):
                 f"Action # {self.num_actions}, "
                 f"Vx: {base_vel[0]:0.3f}, "
                 f"Wz: {np.rad2deg(base_vel[1]):0.3f} "
-                f"pointgoal: {gps_compass[0]:0.3f}, {gps_compass[1]:0.3f} "
+                f"pointgoal: {gps_compass[0]:0.3f}, {np.rad2deg(gps_compass[1]):0.3f} "
                 f"dist2goal: {dist_to_goal:0.3f} "
                 f"ep_dist: {self.episode_distance:0.3f} "
             )
@@ -523,7 +533,7 @@ class EvalWorld(gym.Env):
             self.episode_distance / max(self.episode_distance, episode_geo_dist)
         )
         ep_results = {}
-        ep_results["town_name"] = self.town_name
+        ep_results["world_name"] = self.town_name
         ep_results["episode_id"] = self.episode["episode_id"]
         ep_results["success"] = self.success
         ep_results["spl"] = spl
@@ -531,6 +541,9 @@ class EvalWorld(gym.Env):
         ep_results["num_collisions"] = self.num_collisions
         ep_results["dist2goal"] = dist_to_goal
         ep_results["episode_dist"] = self.episode_distance
+        ep_results["geodesic_dist"] = episode_geo_dist
+        ep_results["start_position"] = start_position
+        ep_results["goal_position"] = goal_position
         self.results["results"].append(ep_results)
         print(
             f"EPISODE OVER! "
@@ -544,9 +557,6 @@ class EvalWorld(gym.Env):
 
     def init_world(self, args, episode):
         start_position = episode["start_position"]
-        os.makedirs(
-            f"eval_imgs/{self.town_name}_{self.episode_id}_{time.time()}", exist_ok=True
-        )
 
         display = pygame.display.set_mode(
             (args.width, args.height), pygame.HWSURFACE | pygame.DOUBLEBUF
@@ -570,15 +580,13 @@ class EvalWorld(gym.Env):
         )
         print("self.done.")
 
-    def game_loop(self, args, episode, policy, policy_pth):
+    def game_loop(self, args, episode, policy, results_dir):
+        self.dataset = args.dataset
         self.episode = episode
         self.episode_id = episode["episode_id"]
         self.town_name = self.world_name.split("/")[-1]
         policy_types = {"context": "ContextNavPolicy", "pointnav": "NavPolicy"}
         self.policy_type = policy_types[args.policy_type]
-
-        results_dir = f"eval_results/{self.policy_type}/{policy_pth}_{time.time()}"
-        os.makedirs(results_dir, exist_ok=True)
 
         self.policy = policy
         self.policy.reset()
@@ -640,6 +648,11 @@ def main():
         default=None,
         type=int,
     )
+    argparser.add_argument(
+        "-d",
+        "--dataset",
+        default="easy",
+    )
 
     args = argparser.parse_args()
 
@@ -653,7 +666,10 @@ def main():
     print(__doc__)
 
     world_loc = "/Game/Carla/Maps/"
-    episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals"
+    episodes_loc = (
+        f"/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_{args.dataset}"
+    )
+    assert os.path.isdir(episodes_loc)
     # episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_7m"
     # world_names = ["Town01"]
     world_names = [
@@ -681,6 +697,9 @@ def main():
     policy_type = policy_types[args.policy_type]
     policy = eval(policy_type)(weights)
 
+    results_dir = f"eval/eval_results/{policy_type}/{args.dataset}/{policy_pth[:-4]}/{time.time()}"
+    os.makedirs(results_dir, exist_ok=True)
+
     for world_name in world_names:
         simulator = EvalWorld(os.path.join(world_loc, world_name))
         episode_json = os.path.join(episodes_loc, world_name + ".json")
@@ -688,7 +707,7 @@ def main():
         episodes_data = json.load(f)
         for episode in episodes_data["episodes"]:
             try:
-                simulator.game_loop(args, episode, policy, policy_pth)
+                simulator.game_loop(args, episode, policy, results_dir)
             except KeyboardInterrupt:
                 print("\nCancelled by user. Bye!")
 
