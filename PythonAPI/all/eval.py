@@ -503,7 +503,10 @@ class EvalWorld(gym.Env):
             new_xyz, new_rpy = self.get_pos_rot()
             self.num_actions += 1
             dist_to_goal = np.linalg.norm(new_xyz[:2] - goal_position[:2])
-            self.episode_distance += np.linalg.norm(new_xyz[:2] - curr_xyz[:2])
+            dist_travelled = np.linalg.norm(new_xyz[:2] - curr_xyz[:2])
+            if dist_travelled > 5:
+                dist_travelled = 0
+            self.episode_distance += dist_travelled
 
             print(
                 f"Action # {self.num_actions}, "
@@ -530,7 +533,7 @@ class EvalWorld(gym.Env):
             pygame.display.flip()
 
         spl = int(self.success) * (
-            self.episode_distance / max(self.episode_distance, episode_geo_dist)
+            episode_geo_dist / max(self.episode_distance, episode_geo_dist)
         )
         ep_results = {}
         ep_results["world_name"] = self.town_name
@@ -580,8 +583,8 @@ class EvalWorld(gym.Env):
         )
         print("self.done.")
 
-    def game_loop(self, args, episode, policy, results_dir):
-        self.dataset = args.dataset
+    def game_loop(self, args, episode, policy, dataset, results_dir):
+        self.dataset = dataset
         self.episode = episode
         self.episode_id = episode["episode_id"]
         self.town_name = self.world_name.split("/")[-1]
@@ -651,7 +654,7 @@ def main():
     argparser.add_argument(
         "-d",
         "--dataset",
-        default="easy",
+        default="",
     )
 
     args = argparser.parse_args()
@@ -664,24 +667,6 @@ def main():
     logging.info("listening to server %s:%s", args.host, args.port)
 
     print(__doc__)
-
-    world_loc = "/Game/Carla/Maps/"
-    episodes_loc = (
-        f"/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_{args.dataset}"
-    )
-    assert os.path.isdir(episodes_loc)
-    # episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_7m"
-    # world_names = ["Town01"]
-    world_names = [
-        "Town01",
-        "Town02",
-        "Town03",
-        "Town04",
-        "Town05",
-        "Town06",
-        "Town07",
-        "Town10HD",
-    ]
 
     weights_dir = "/home/joanne/repos/carla/PythonAPI/all/weights/"
 
@@ -696,20 +681,40 @@ def main():
     policy_types = {"context": "ContextNavPolicy", "pointnav": "NavPolicy"}
     policy_type = policy_types[args.policy_type]
     policy = eval(policy_type)(weights)
+    eval_time = time.time()
 
-    results_dir = f"eval/eval_results/{policy_type}/{args.dataset}/{policy_pth[:-4]}/{time.time()}"
-    os.makedirs(results_dir, exist_ok=True)
+    world_loc = "/Game/Carla/Maps/"
+    # episodes_loc = "/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_7m"
+    # world_names = ["Town01"]
+    world_names = [
+        "Town01",
+        "Town02",
+        "Town03",
+        "Town04",
+        "Town05",
+        "Town06",
+        "Town07",
+        "Town10HD",
+    ]
 
-    for world_name in world_names:
-        simulator = EvalWorld(os.path.join(world_loc, world_name))
-        episode_json = os.path.join(episodes_loc, world_name + ".json")
-        f = open(episode_json)
-        episodes_data = json.load(f)
-        for episode in episodes_data["episodes"]:
-            try:
-                simulator.game_loop(args, episode, policy, results_dir)
-            except KeyboardInterrupt:
-                print("\nCancelled by user. Bye!")
+    datsets = ["easy", "medium", "hard"] if args.dataset == "" else [f"{args.dataset}"]
+    for dataset in datsets:
+        episodes_loc = (
+            f"/home/joanne/repos/carla/PythonAPI/all/carla_sidewalk_goals_{dataset}"
+        )
+        results_dir = f"eval/eval_results/{policy_type}/{eval_time}/{args.dataset}"
+        os.makedirs(results_dir, exist_ok=True)
+        assert os.path.isdir(episodes_loc)
+        for world_name in world_names:
+            simulator = EvalWorld(os.path.join(world_loc, world_name))
+            episode_json = os.path.join(episodes_loc, world_name + ".json")
+            f = open(episode_json)
+            episodes_data = json.load(f)
+            for episode in episodes_data["episodes"]:
+                try:
+                    simulator.game_loop(args, episode, policy, dataset, results_dir)
+                except KeyboardInterrupt:
+                    print("\nCancelled by user. Bye!")
 
 
 if __name__ == "__main__":
